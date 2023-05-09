@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+r'''
+Created by Marcin Ulikowski <marcin@ulikowski.pl>
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+'''
+
 import os
 from queue import Queue
 from uuid import uuid4
@@ -47,14 +63,17 @@ app = Flask(__name__)
 def janitor(sessions):
 	while True:
 		time.sleep(1)
-		for s in sessions:
+		for s in sorted(sessions, key=lambda x: x.timestamp):
 			if s.jobs.empty() and s.threads:
 				s.stop()
 				continue
-			maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-			if (((s.timestamp + SESSION_TTL) < time.time())
-				or (MEMORY_LIMIT and maxrss > MEMORY_LIMIT and not s.threads)):
+			if (s.timestamp + SESSION_TTL) < time.time():
 				sessions.remove(s)
+				continue
+			if MEMORY_LIMIT:
+				maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+				if not s.threads and maxrss > MEMORY_LIMIT:
+					sessions.remove(s)
 
 class Session():
 	def __init__(self, url, nameservers=None, thread_count=THREADS):
@@ -75,9 +94,8 @@ class Session():
 			self.jobs.put(domain)
 		for _ in range(self.thread_count):
 			worker = dnstwist.Scanner(self.jobs)
-			worker.daemon = True
-			worker.option_extdns = True
-			worker.option_geoip = True
+			worker.option_extdns = dnstwist.MODULE_DNSPYTHON
+			worker.option_geoip = dnstwist.MODULE_GEOIP
 			if self.nameservers:
 				worker.nameservers = self.nameservers.split(',')
 			worker.start()

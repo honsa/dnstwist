@@ -25,13 +25,13 @@ limitations under the License.
 '''
 
 __author__ = 'Marcin Ulikowski'
-__version__ = '20221213'
+__version__ = '20230509'
 __email__ = 'marcin@ulikowski.pl'
 
 import re
 import sys
 import socket
-socket.setdefaulttimeout(10.0)
+socket.setdefaulttimeout(12.0)
 import signal
 import time
 import argparse
@@ -44,17 +44,27 @@ import urllib.request
 import urllib.parse
 import gzip
 from io import BytesIO
+import contextlib
+
+def _debug(msg):
+	if 'DEBUG' in os.environ:
+		if isinstance(msg, Exception):
+			print('{}:{} {}'.format(__file__, msg.__traceback__.tb_lineno, str(msg)), file=sys.stderr, flush=True)
+		else:
+			print(str(msg), file=sys.stderr, flush=True)
 
 try:
 	from PIL import Image
 	MODULE_PIL = True
-except ImportError:
+except ImportError as e:
+	_debug(e)
 	MODULE_PIL = False
 
 try:
 	from selenium import webdriver
 	MODULE_SELENIUM = True
-except ImportError:
+except ImportError as e:
+	_debug(e)
 	MODULE_SELENIUM = False
 
 try:
@@ -62,18 +72,21 @@ try:
 	import dns.rdatatype
 	from dns.exception import DNSException
 	MODULE_DNSPYTHON = True
-except ImportError:
+except ImportError as e:
+	_debug(e)
 	MODULE_DNSPYTHON = False
 
 GEOLITE2_MMDB = os.environ.get('GEOLITE2_MMDB' , os.path.join(os.path.dirname(__file__), 'GeoLite2-Country.mmdb'))
 try:
 	import geoip2.database
 	_ = geoip2.database.Reader(GEOLITE2_MMDB)
-except Exception:
+except Exception as e:
+	_debug(e)
 	try:
 		import GeoIP
 		_ = GeoIP.new(-1)
-	except Exception:
+	except Exception as e:
+		_debug(e)
 		MODULE_GEOIP = False
 	else:
 		MODULE_GEOIP = True
@@ -93,28 +106,33 @@ else:
 try:
 	import whois
 	MODULE_WHOIS = True
-except ImportError:
+except ImportError as e:
+	_debug(e)
 	MODULE_WHOIS = False
 
 try:
 	import ssdeep
 	MODULE_SSDEEP = True
-except ImportError:
+except ImportError as e:
+	_debug(e)
 	try:
 		import ppdeep as ssdeep
 		MODULE_SSDEEP = True
-	except ImportError:
+	except ImportError as e:
+		_debug(e)
 		MODULE_SSDEEP = False
 
 try:
 	import tlsh
 	MODULE_TLSH = True
-except ImportError:
+except ImportError as e:
+	_debug(e)
 	MODULE_TLSH = False
 
 try:
 	import idna
-except ImportError:
+except ImportError as e:
+	_debug(e)
 	class idna:
 		@staticmethod
 		def decode(domain):
@@ -308,7 +326,7 @@ class pHash():
 
 
 class HeadlessBrowser():
-	WEBDRIVER_TIMEOUT = 10
+	WEBDRIVER_TIMEOUT = 12
 	WEBDRIVER_ARGUMENTS = (
 		'--disable-dev-shm-usage',
 		'--ignore-certificate-errors',
@@ -380,72 +398,189 @@ class HeadlessBrowser():
 
 
 class Fuzzer():
+	glyphs_idn_by_tld = {
+		**dict.fromkeys(['cz', 'sk', 'uk', 'co.uk', 'nl', 'edu'], {
+			# IDN not suported by the corresponding registry
+		}),
+		**dict.fromkeys(['br'], {
+			'a': ('à', 'á', 'â', 'ã'),
+			'c': ('ç',),
+			'e': ('é', 'ê'),
+			'i': ('í',),
+			'o': ('ó', 'ô', 'õ'),
+			'u': ('ú', 'ü'),
+			'y': ('ý', 'ÿ'),
+		}),
+		**dict.fromkeys(['dk'], {
+			'a': ('ä', 'å'),
+			'e': ('é',),
+			'o': ('ö', 'ø'),
+			'u': ('ü',),
+			'ae': ('æ',),
+		}),
+		**dict.fromkeys(['eu', 'de', 'pl'], {
+			'a': ('á', 'à', 'ă', 'â', 'å', 'ä', 'ã', 'ą', 'ā'),
+			'c': ('ć', 'ĉ', 'č', 'ċ', 'ç'),
+			'd': ('ď', 'đ'),
+			'e': ('é', 'è', 'ĕ', 'ê', 'ě', 'ë', 'ė', 'ę', 'ē'),
+			'g': ('ğ', 'ĝ', 'ġ', 'ģ'),
+			'h': ('ĥ', 'ħ'),
+			'i': ('í', 'ì', 'ĭ', 'î', 'ï', 'ĩ', 'į', 'ī'),
+			'j': ('ĵ',),
+			'k': ('ķ', 'ĸ'),
+			'l': ('ĺ', 'ľ', 'ļ', 'ł'),
+			'n': ('ń', 'ň', 'ñ', 'ņ'),
+			'o': ('ó', 'ò', 'ŏ', 'ô', 'ö', 'ő', 'õ', 'ø', 'ō'),
+			'r': ('ŕ', 'ř', 'ŗ'),
+			's': ('ś', 'ŝ', 'š', 'ş'),
+			't': ('ť', 'ţ', 'ŧ'),
+			'u': ('ú', 'ù', 'ŭ', 'û', 'ů', 'ü', 'ű', 'ũ', 'ų', 'ū'),
+			'w': ('ŵ',),
+			'y': ('ý', 'ŷ', 'ÿ'),
+			'z': ('ź', 'ž', 'ż'),
+			'ae': ('æ',),
+			'oe': ('œ',),
+		}),
+		**dict.fromkeys(['fi'], {
+			'3': ('ʒ',),
+			'a': ('á', 'ä', 'å', 'â'),
+			'c': ('č',),
+			'd': ('đ',),
+			'g': ('ǧ', 'ǥ'),
+			'k': ('ǩ',),
+			'n': ('ŋ',),
+			'o': ('õ', 'ö'),
+			's': ('š',),
+			't': ('ŧ',),
+			'z': ('ž',),
+		}),
+		**dict.fromkeys(['no'], {
+			'a': ('á', 'à', 'ä', 'å'),
+			'c': ('č', 'ç'),
+			'e': ('é', 'è', 'ê'),
+			'i': ('ï',),
+			'n': ('ŋ', 'ń', 'ñ'),
+			'o': ('ó', 'ò', 'ô', 'ö', 'ø'),
+			's': ('š',),
+			't': ('ŧ',),
+			'u': ('ü',),
+			'z': ('ž',),
+			'ae': ('æ',),
+		}),
+		**dict.fromkeys(['be', 'fr', 're', 'yt', 'pm', 'wf', 'tf', 'ch', 'li'], {
+			'a': ('à', 'á', 'â', 'ã', 'ä', 'å'),
+			'c': ('ç',),
+			'e': ('è', 'é', 'ê', 'ë'),
+			'i': ('ì', 'í', 'î', 'ï'),
+			'n': ('ñ',),
+			'o': ('ò', 'ó', 'ô', 'õ', 'ö'),
+			'u': ('ù', 'ú', 'û', 'ü'),
+			'y': ('ý', 'ÿ'),
+			'ae': ('æ',),
+			'oe': ('œ',),
+		}),
+		**dict.fromkeys(['ca'], {
+			'a': ('à', 'â'),
+			'c': ('ç',),
+			'e': ('è', 'é', 'ê', 'ë'),
+			'i': ('î', 'ï'),
+			'o': ('ô',),
+			'u': ('ù', 'û', 'ü'),
+			'y': ('ÿ',),
+			'ae': ('æ',),
+			'oe': ('œ',),
+		}),
+	}
+
+	glyphs_unicode = {
+		'2': ('ƻ',),
+		'3': ('ʒ',),
+		'5': ('ƽ',),
+		'a': ('ạ', 'ă', 'ȧ', 'ɑ', 'å', 'ą', 'â', 'ǎ', 'á', 'ə', 'ä', 'ã', 'ā', 'à'),
+		'b': ('ḃ', 'ḅ', 'ƅ', 'ʙ', 'ḇ', 'ɓ'),
+		'c': ('č', 'ᴄ', 'ċ', 'ç', 'ć', 'ĉ', 'ƈ'),
+		'd': ('ď', 'ḍ', 'ḋ', 'ɖ', 'ḏ', 'ɗ', 'ḓ', 'ḑ', 'đ'),
+		'e': ('ê', 'ẹ', 'ę', 'è', 'ḛ', 'ě', 'ɇ', 'ė', 'ĕ', 'é', 'ë', 'ē', 'ȩ'),
+		'f': ('ḟ', 'ƒ'),
+		'g': ('ǧ', 'ġ', 'ǵ', 'ğ', 'ɡ', 'ǥ', 'ĝ', 'ģ', 'ɢ'),
+		'h': ('ȟ', 'ḫ', 'ḩ', 'ḣ', 'ɦ', 'ḥ', 'ḧ', 'ħ', 'ẖ', 'ⱨ', 'ĥ'),
+		'i': ('ɩ', 'ǐ', 'í', 'ɪ', 'ỉ', 'ȋ', 'ɨ', 'ï', 'ī', 'ĩ', 'ị', 'î', 'ı', 'ĭ', 'į', 'ì'),
+		'j': ('ǰ', 'ĵ', 'ʝ', 'ɉ'),
+		'k': ('ĸ', 'ǩ', 'ⱪ', 'ḵ', 'ķ', 'ᴋ', 'ḳ'),
+		'l': ('ĺ', 'ł', 'ɫ', 'ļ', 'ľ'),
+		'm': ('ᴍ', 'ṁ', 'ḿ', 'ṃ', 'ɱ'),
+		'n': ('ņ', 'ǹ', 'ń', 'ň', 'ṅ', 'ṉ', 'ṇ', 'ꞑ', 'ñ', 'ŋ'),
+		'o': ('ö', 'ó', 'ȯ', 'ỏ', 'ô', 'ᴏ', 'ō', 'ò', 'ŏ', 'ơ', 'ő', 'õ', 'ọ', 'ø'),
+		'p': ('ṗ', 'ƿ', 'ƥ', 'ṕ'),
+		'q': ('ʠ',),
+		'r': ('ʀ', 'ȓ', 'ɍ', 'ɾ', 'ř', 'ṛ', 'ɽ', 'ȑ', 'ṙ', 'ŗ', 'ŕ', 'ɼ', 'ṟ'),
+		's': ('ṡ', 'ș', 'ŝ', 'ꜱ', 'ʂ', 'š', 'ś', 'ṣ', 'ş'),
+		't': ('ť', 'ƫ', 'ţ', 'ṭ', 'ṫ', 'ț', 'ŧ'),
+		'u': ('ᴜ', 'ų', 'ŭ', 'ū', 'ű', 'ǔ', 'ȕ', 'ư', 'ù', 'ů', 'ʉ', 'ú', 'ȗ', 'ü', 'û', 'ũ', 'ụ'),
+		'v': ('ᶌ', 'ṿ', 'ᴠ', 'ⱴ', 'ⱱ', 'ṽ'),
+		'w': ('ᴡ', 'ẇ', 'ẅ', 'ẃ', 'ẘ', 'ẉ', 'ⱳ', 'ŵ', 'ẁ'),
+		'x': ('ẋ', 'ẍ'),
+		'y': ('ŷ', 'ÿ', 'ʏ', 'ẏ', 'ɏ', 'ƴ', 'ȳ', 'ý', 'ỿ', 'ỵ'),
+		'z': ('ž', 'ƶ', 'ẓ', 'ẕ', 'ⱬ', 'ᴢ', 'ż', 'ź', 'ʐ'),
+		'ae': ('æ',),
+		'oe': ('œ',),
+	}
+
+	glyphs_ascii = {
+		'0': ('o',),
+		'1': ('l', 'i'),
+		'3': ('8',),
+		'6': ('9',),
+		'8': ('3',),
+		'9': ('6',),
+		'b': ('d', 'lb'),
+		'c': ('e',),
+		'd': ('b', 'cl', 'dl'),
+		'e': ('c',),
+		'g': ('q',),
+		'h': ('lh'),
+		'i': ('1', 'l'),
+		'k': ('lc'),
+		'l': ('1', 'i'),
+		'm': ('n', 'nn', 'rn', 'rr'),
+		'n': ('m', 'r'),
+		'o': ('0',),
+		'q': ('g',),
+		'w': ('vv',),
+	}
+
+	latin_to_cyrillic = {
+		'a': 'а', 'b': 'ь', 'c': 'с', 'd': 'ԁ', 'e': 'е', 'g': 'ԍ', 'h': 'һ',
+		'i': 'і', 'j': 'ј', 'k': 'к', 'l': 'ӏ', 'm': 'м', 'o': 'о', 'p': 'р',
+		'q': 'ԛ', 's': 'ѕ', 't': 'т', 'v': 'ѵ', 'w': 'ԝ', 'x': 'х', 'y': 'у',
+	}
+
+	qwerty = {
+		'1': '2q', '2': '3wq1', '3': '4ew2', '4': '5re3', '5': '6tr4', '6': '7yt5', '7': '8uy6', '8': '9iu7', '9': '0oi8', '0': 'po9',
+		'q': '12wa', 'w': '3esaq2', 'e': '4rdsw3', 'r': '5tfde4', 't': '6ygfr5', 'y': '7uhgt6', 'u': '8ijhy7', 'i': '9okju8', 'o': '0plki9', 'p': 'lo0',
+		'a': 'qwsz', 's': 'edxzaw', 'd': 'rfcxse', 'f': 'tgvcdr', 'g': 'yhbvft', 'h': 'ujnbgy', 'j': 'ikmnhu', 'k': 'olmji', 'l': 'kop',
+		'z': 'asx', 'x': 'zsdc', 'c': 'xdfv', 'v': 'cfgb', 'b': 'vghn', 'n': 'bhjm', 'm': 'njk'
+	}
+	qwertz = {
+		'1': '2q', '2': '3wq1', '3': '4ew2', '4': '5re3', '5': '6tr4', '6': '7zt5', '7': '8uz6', '8': '9iu7', '9': '0oi8', '0': 'po9',
+		'q': '12wa', 'w': '3esaq2', 'e': '4rdsw3', 'r': '5tfde4', 't': '6zgfr5', 'z': '7uhgt6', 'u': '8ijhz7', 'i': '9okju8', 'o': '0plki9', 'p': 'lo0',
+		'a': 'qwsy', 's': 'edxyaw', 'd': 'rfcxse', 'f': 'tgvcdr', 'g': 'zhbvft', 'h': 'ujnbgz', 'j': 'ikmnhu', 'k': 'olmji', 'l': 'kop',
+		'y': 'asx', 'x': 'ysdc', 'c': 'xdfv', 'v': 'cfgb', 'b': 'vghn', 'n': 'bhjm', 'm': 'njk'
+	}
+	azerty = {
+		'1': '2a', '2': '3za1', '3': '4ez2', '4': '5re3', '5': '6tr4', '6': '7yt5', '7': '8uy6', '8': '9iu7', '9': '0oi8', '0': 'po9',
+		'a': '2zq1', 'z': '3esqa2', 'e': '4rdsz3', 'r': '5tfde4', 't': '6ygfr5', 'y': '7uhgt6', 'u': '8ijhy7', 'i': '9okju8', 'o': '0plki9', 'p': 'lo0m',
+		'q': 'zswa', 's': 'edxwqz', 'd': 'rfcxse', 'f': 'tgvcdr', 'g': 'yhbvft', 'h': 'ujnbgy', 'j': 'iknhu', 'k': 'olji', 'l': 'kopm', 'm': 'lp',
+		'w': 'sxq', 'x': 'wsdc', 'c': 'xdfv', 'v': 'cfgb', 'b': 'vghn', 'n': 'bhj'
+	}
+	keyboards = [qwerty, qwertz, azerty]
+
 	def __init__(self, domain, dictionary=[], tld_dictionary=[]):
 		self.subdomain, self.domain, self.tld = domain_tld(domain)
 		self.domain = idna.decode(self.domain)
 		self.dictionary = list(dictionary)
 		self.tld_dictionary = list(tld_dictionary)
 		self.domains = set()
-		self.qwerty = {
-			'1': '2q', '2': '3wq1', '3': '4ew2', '4': '5re3', '5': '6tr4', '6': '7yt5', '7': '8uy6', '8': '9iu7', '9': '0oi8', '0': 'po9',
-			'q': '12wa', 'w': '3esaq2', 'e': '4rdsw3', 'r': '5tfde4', 't': '6ygfr5', 'y': '7uhgt6', 'u': '8ijhy7', 'i': '9okju8', 'o': '0plki9', 'p': 'lo0',
-			'a': 'qwsz', 's': 'edxzaw', 'd': 'rfcxse', 'f': 'tgvcdr', 'g': 'yhbvft', 'h': 'ujnbgy', 'j': 'ikmnhu', 'k': 'olmji', 'l': 'kop',
-			'z': 'asx', 'x': 'zsdc', 'c': 'xdfv', 'v': 'cfgb', 'b': 'vghn', 'n': 'bhjm', 'm': 'njk'
-			}
-		self.qwertz = {
-			'1': '2q', '2': '3wq1', '3': '4ew2', '4': '5re3', '5': '6tr4', '6': '7zt5', '7': '8uz6', '8': '9iu7', '9': '0oi8', '0': 'po9',
-			'q': '12wa', 'w': '3esaq2', 'e': '4rdsw3', 'r': '5tfde4', 't': '6zgfr5', 'z': '7uhgt6', 'u': '8ijhz7', 'i': '9okju8', 'o': '0plki9', 'p': 'lo0',
-			'a': 'qwsy', 's': 'edxyaw', 'd': 'rfcxse', 'f': 'tgvcdr', 'g': 'zhbvft', 'h': 'ujnbgz', 'j': 'ikmnhu', 'k': 'olmji', 'l': 'kop',
-			'y': 'asx', 'x': 'ysdc', 'c': 'xdfv', 'v': 'cfgb', 'b': 'vghn', 'n': 'bhjm', 'm': 'njk'
-			}
-		self.azerty = {
-			'1': '2a', '2': '3za1', '3': '4ez2', '4': '5re3', '5': '6tr4', '6': '7yt5', '7': '8uy6', '8': '9iu7', '9': '0oi8', '0': 'po9',
-			'a': '2zq1', 'z': '3esqa2', 'e': '4rdsz3', 'r': '5tfde4', 't': '6ygfr5', 'y': '7uhgt6', 'u': '8ijhy7', 'i': '9okju8', 'o': '0plki9', 'p': 'lo0m',
-			'q': 'zswa', 's': 'edxwqz', 'd': 'rfcxse', 'f': 'tgvcdr', 'g': 'yhbvft', 'h': 'ujnbgy', 'j': 'iknhu', 'k': 'olji', 'l': 'kopm', 'm': 'lp',
-			'w': 'sxq', 'x': 'wsdc', 'c': 'xdfv', 'v': 'cfgb', 'b': 'vghn', 'n': 'bhj'
-			}
-		self.keyboards = [self.qwerty, self.qwertz, self.azerty]
-		self.glyphs = {
-			'0': ['o'],
-			'1': ['l', 'i'],
-			'2': ['ƻ'],
-			'3': ['8'],
-			'5': ['ƽ'],
-			'6': ['9'],
-			'8': ['3'],
-			'9': ['6'],
-			'a': ['à', 'á', 'à', 'â', 'ã', 'ä', 'å', 'ɑ', 'ạ', 'ǎ', 'ă', 'ȧ', 'ą', 'ə'],
-			'b': ['d', 'lb', 'ʙ', 'ɓ', 'ḃ', 'ḅ', 'ḇ', 'ƅ'],
-			'c': ['e', 'ƈ', 'ċ', 'ć', 'ç', 'č', 'ĉ', 'ᴄ'],
-			'd': ['b', 'cl', 'dl', 'ɗ', 'đ', 'ď', 'ɖ', 'ḑ', 'ḋ', 'ḍ', 'ḏ', 'ḓ'],
-			'e': ['c', 'é', 'è', 'ê', 'ë', 'ē', 'ĕ', 'ě', 'ė', 'ẹ', 'ę', 'ȩ', 'ɇ', 'ḛ'],
-			'f': ['ƒ', 'ḟ'],
-			'g': ['q', 'ɢ', 'ɡ', 'ġ', 'ğ', 'ǵ', 'ģ', 'ĝ', 'ǧ', 'ǥ'],
-			'h': ['lh', 'ĥ', 'ȟ', 'ħ', 'ɦ', 'ḧ', 'ḩ', 'ⱨ', 'ḣ', 'ḥ', 'ḫ', 'ẖ'],
-			'i': ['1', 'l', 'í', 'ì', 'ï', 'ı', 'ɩ', 'ǐ', 'ĭ', 'ỉ', 'ị', 'ɨ', 'ȋ', 'ī', 'ɪ'],
-			'j': ['ʝ', 'ǰ', 'ɉ', 'ĵ'],
-			'k': ['lk', 'ik', 'lc', 'ḳ', 'ḵ', 'ⱪ', 'ķ', 'ᴋ'],
-			'l': ['1', 'i', 'ɫ', 'ł'],
-			'm': ['n', 'nn', 'rn', 'rr', 'ṁ', 'ṃ', 'ᴍ', 'ɱ', 'ḿ'],
-			'n': ['m', 'r', 'ń', 'ṅ', 'ṇ', 'ṉ', 'ñ', 'ņ', 'ǹ', 'ň', 'ꞑ'],
-			'o': ['0', 'ȯ', 'ọ', 'ỏ', 'ơ', 'ó', 'ö', 'ᴏ'],
-			'p': ['ƿ', 'ƥ', 'ṕ', 'ṗ'],
-			'q': ['g', 'ʠ'],
-			'r': ['ʀ', 'ɼ', 'ɽ', 'ŕ', 'ŗ', 'ř', 'ɍ', 'ɾ', 'ȓ', 'ȑ', 'ṙ', 'ṛ', 'ṟ'],
-			's': ['ʂ', 'ś', 'ṣ', 'ṡ', 'ș', 'ŝ', 'š', 'ꜱ'],
-			't': ['ţ', 'ŧ', 'ṫ', 'ṭ', 'ț', 'ƫ'],
-			'u': ['ᴜ', 'ǔ', 'ŭ', 'ü', 'ʉ', 'ù', 'ú', 'û', 'ũ', 'ū', 'ų', 'ư', 'ů', 'ű', 'ȕ', 'ȗ', 'ụ'],
-			'v': ['ṿ', 'ⱱ', 'ᶌ', 'ṽ', 'ⱴ', 'ᴠ'],
-			'w': ['vv', 'ŵ', 'ẁ', 'ẃ', 'ẅ', 'ⱳ', 'ẇ', 'ẉ', 'ẘ', 'ᴡ'],
-			'x': ['ẋ', 'ẍ'],
-			'y': ['ʏ', 'ý', 'ÿ', 'ŷ', 'ƴ', 'ȳ', 'ɏ', 'ỿ', 'ẏ', 'ỵ'],
-			'z': ['ʐ', 'ż', 'ź', 'ᴢ', 'ƶ', 'ẓ', 'ẕ', 'ⱬ']
-			}
-		self.latin_to_cyrillic = {
-			'a': 'а', 'b': 'ь', 'c': 'с', 'd': 'ԁ', 'e': 'е', 'g': 'ԍ', 'h': 'һ',
-			'i': 'і', 'j': 'ј', 'k': 'к', 'l': 'ӏ', 'm': 'м', 'o': 'о', 'p': 'р',
-			'q': 'ԛ', 's': 'ѕ', 't': 'т', 'v': 'ѵ', 'w': 'ԝ', 'x': 'х', 'y': 'у',
-			}
 
 	def _bitsquatting(self):
 		masks = [1, 2, 4, 8, 16, 32, 64, 128]
@@ -466,14 +601,15 @@ class Fuzzer():
 		return [cdomain]
 
 	def _homoglyph(self):
+		md = lambda a, b: {k: set(a.get(k, [])) | set(b.get(k, [])) for k in set(a.keys()) | set(b.keys())}
+		glyphs = md(self.glyphs_ascii, self.glyphs_idn_by_tld.get(self.tld, self.glyphs_unicode))
 		def mix(domain):
-			glyphs = self.glyphs
 			for w in range(1, len(domain)):
 				for i in range(len(domain)-w+1):
 					pre = domain[:i]
 					win = domain[i:i+w]
 					suf = domain[i+w:]
-					for c in set(win):
+					for c in (set(win) | {win[:2]}):
 						for g in glyphs.get(c, []):
 							yield pre + win.replace(c, g) + suf
 		result1 = set(mix(self.domain))
@@ -613,9 +749,9 @@ class Scanner(threading.Thread):
 	def __init__(self, queue):
 		threading.Thread.__init__(self)
 		self._stop_event = threading.Event()
+		self.daemon = True
 		self.id = 0
 		self.jobs = queue
-		self.debug = False
 		self.lsh_init = ''
 		self.lsh_effective_url = ''
 		self.phash_init = None
@@ -630,10 +766,6 @@ class Scanner(threading.Thread):
 		self.nameservers = []
 		self.useragent = ''
 
-	def _debug(self, text):
-		if self.debug:
-			print(str(text), file=sys.stderr, flush=True)
-
 	def _banner_http(self, ip, vhost):
 		try:
 			http = socket.socket()
@@ -642,8 +774,8 @@ class Scanner(threading.Thread):
 			http.send('HEAD / HTTP/1.1\r\nHost: {}\r\nUser-agent: {}\r\n\r\n'.format(vhost, self.useragent).encode())
 			response = http.recv(1024).decode()
 			http.close()
-		except Exception:
-			pass
+		except Exception as e:
+			_debug(e)
 		else:
 			headers = response.splitlines()
 			for field in headers:
@@ -657,8 +789,8 @@ class Scanner(threading.Thread):
 			smtp.connect((mx, 25))
 			response = smtp.recv(1024).decode()
 			smtp.close()
-		except Exception:
-			pass
+		except Exception as e:
+			_debug(e)
 		else:
 			hello = response.splitlines()[0]
 			if hello.startswith('220'):
@@ -735,7 +867,7 @@ class Scanner(threading.Thread):
 				except NoNameservers:
 					task['dns_ns'] = ['!ServFail']
 				except DNSException as e:
-					self._debug(e)
+					_debug(e)
 
 				if nxdomain is False:
 					try:
@@ -744,7 +876,7 @@ class Scanner(threading.Thread):
 					except NoNameservers:
 						task['dns_a'] = ['!ServFail']
 					except DNSException as e:
-						self._debug(e)
+						_debug(e)
 
 					try:
 						task['dns_aaaa'] = _answer_to_list(resolve(domain, rdtype=dns.rdatatype.AAAA))
@@ -752,7 +884,7 @@ class Scanner(threading.Thread):
 					except NoNameservers:
 						task['dns_aaaa'] = ['!ServFail']
 					except DNSException as e:
-						self._debug(e)
+						_debug(e)
 
 				if nxdomain is False and dns_ns is True:
 					try:
@@ -761,7 +893,7 @@ class Scanner(threading.Thread):
 					except NoNameservers:
 						task['dns_mx'] = ['!ServFail']
 					except DNSException as e:
-						self._debug(e)
+						_debug(e)
 			else:
 				try:
 					addrinfo = socket.getaddrinfo(domain, None, proto=socket.IPPROTO_TCP)
@@ -769,7 +901,7 @@ class Scanner(threading.Thread):
 					if e.errno == -3:
 						task['dns_a'] = ['!ServFail']
 				except Exception as e:
-					self._debug(e)
+					_debug(e)
 				else:
 					for _, _, _, _, sa in addrinfo:
 						ip = sa[0]
@@ -799,7 +931,7 @@ class Scanner(threading.Thread):
 					try:
 						country = geo.country_by_addr(task['dns_a'][0])
 					except Exception as e:
-						self._debug(e)
+						_debug(e)
 						pass
 					else:
 						if country:
@@ -821,7 +953,7 @@ class Scanner(threading.Thread):
 						browser.get(self.url.full_uri(domain))
 						screenshot = browser.screenshot()
 					except Exception as e:
-						self._debug(e)
+						_debug(e)
 					else:
 						if self.option_phash:
 							phash = pHash(BytesIO(screenshot))
@@ -832,7 +964,7 @@ class Scanner(threading.Thread):
 								with open(filename, 'wb') as f:
 									f.write(screenshot)
 							except Exception as e:
-								self._debug(e)
+								_debug(e)
 
 			if self.option_lsh:
 				if dns_a is True or dns_aaaa is True:
@@ -842,7 +974,7 @@ class Scanner(threading.Thread):
 							headers={'user-agent': self.useragent},
 							verify=False)
 					except Exception as e:
-						self._debug(e)
+						_debug(e)
 					else:
 						if r.url.split('?')[0] != self.lsh_effective_url:
 							if self.option_lsh == 'ssdeep':
@@ -974,7 +1106,6 @@ def run(**kwargs):
 	parser.add_argument('--nameservers', type=str, metavar='LIST', help='DNS or DoH servers to query (separated with commas)')
 	parser.add_argument('--useragent', type=str, metavar='STRING', default=USER_AGENT_STRING,
 		help='Set User-Agent STRING (default: %s)' % USER_AGENT_STRING)
-	parser.add_argument('--debug', action='store_true', help='Display debug messages')
 
 	if kwargs:
 		sys.argv = ['']
@@ -1046,6 +1177,10 @@ def run(**kwargs):
 	fuzzers = []
 	if args.fuzzers:
 		fuzzers = [x.strip().lower() for x in set(args.fuzzers.split(','))]
+		if args.dictionary and 'dictionary' not in fuzzers:
+			parser.error('argument --dictionary cannot be used with selected fuzzing algorithms (consider enabling fuzzer: dictionary)')
+		if args.tld and 'tld-swap' not in fuzzers:
+			parser.error('argument --tld cannot be used with selected fuzzing algorithms (consider enabling fuzzer: tld-swap)')
 
 	nameservers = []
 	if args.nameservers:
@@ -1067,21 +1202,31 @@ def run(**kwargs):
 
 	dictionary = []
 	if args.dictionary:
-		if not os.path.isfile(args.dictionary):
-			parser.error('dictionary file not found: %s' % args.dictionary)
-		if not os.access(args.dictionary, os.R_OK):
-			parser.error('permission denied: %s' % args.dictionary)
-		with open(args.dictionary) as f:
-			dictionary = [x for x in set(f.read().splitlines()) if x.isalnum()]
+		try:
+			with open(args.dictionary, encoding='utf-8') as f:
+				dictionary = [x for x in set(f.read().splitlines()) if x.isalnum()]
+		except FileNotFoundError:
+			parser.error('file not found: {}'.format(args.dictionary))
+		except PermissionError:
+			parser.error('permission denied: {}'.format(args.dictionary))
+		except UnicodeDecodeError:
+			parser.error('UTF-8 decode error when reading: {}'.format(args.dictionary))
+		except OSError as err:
+			parser.error(err)
 
 	tld = []
 	if args.tld:
-		if not os.path.isfile(args.tld):
-			parser.error('dictionary file not found: %s' % args.tld)
-		if not os.access(args.tld, os.R_OK):
-			parser.error('permission denied: %s' % args.tld)
-		with open(args.tld) as f:
-			tld = [x for x in set(f.read().splitlines()) if re.match(r'^[a-z0-9-]{2,63}(\.[a-z0-9-]{2,63}){0,1}$', x)]
+		try:
+			with open(args.tld, encoding='utf-8') as f:
+				tld = [x for x in set(f.read().splitlines()) if re.match(r'^[a-z0-9-]{2,63}(\.[a-z0-9-]{2,63}){0,1}$', x)]
+		except FileNotFoundError:
+			parser.error('file not found: {}'.format(args.tld))
+		except PermissionError:
+			parser.error('permission denied: {}'.format(args.tld))
+		except UnicodeDecodeError:
+			parser.error('UTF-8 decode error when reading: {}'.format(args.tld))
+		except OSError as err:
+			parser.error(err)
 
 	if args.output:
 		try:
@@ -1130,7 +1275,7 @@ def run(**kwargs):
 
 	if args.geoip:
 		if not MODULE_GEOIP:
-			parser.error('missing GeoIP library or database')
+			parser.error('missing geoip2 library or database file (check $GEOLITE2_MMDB environment variable)')
 
 	try:
 		url = UrlParser(args.domain)
@@ -1212,7 +1357,6 @@ r'''     _           _            _     _
 	sid = int.from_bytes(os.urandom(4), sys.byteorder)
 	for _ in range(args.threads):
 		worker = Scanner(jobs)
-		worker.daemon = True
 		worker.id = sid
 		worker.url = url
 		worker.option_extdns = MODULE_DNSPYTHON
@@ -1233,7 +1377,6 @@ r'''     _           _            _     _
 		if args.nameservers:
 			worker.nameservers = nameservers
 		worker.useragent = args.useragent
-		worker.debug = args.debug
 		worker.start()
 		threads.append(worker)
 
@@ -1268,10 +1411,10 @@ r'''     _           _            _     _
 			p_cli(ST_CLR + '\rWHOIS: {} ({:.2%})'.format(domain['domain'], (i+1)/total))
 			try:
 				_, dom, tld = domain_tld(domain['domain'])
-				whoisq = whois.query('.'.join([dom, tld]))
+				with open(os.devnull, 'w') as devnull, contextlib.redirect_stderr(devnull):
+					whoisq = whois.query('.'.join([dom, tld]))
 			except Exception as e:
-				if args.debug:
-					p_err(e)
+				_debug(e)
 			else:
 				if whoisq is None:
 					continue
